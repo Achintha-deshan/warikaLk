@@ -24,12 +24,11 @@ function issuePlatformSession(res: Response, adminId: string): void {
   const token = jwt.sign({ adminId, isPlatformAdmin: true }, env.PLATFORM_JWT_SECRET, { expiresIn: '8h' });
   res.cookie('platform_session_token', token, {
     httpOnly: true,
-    // Same reasoning as authController.issueSession: sameSite: 'none' for a
-    // cross-origin deployment requires secure: true unconditionally, not
-    // env-dependent — secure: false + sameSite: 'none' is rejected outright
-    // by modern browsers, not just discouraged.
-    secure: true,
-    sameSite: 'none',
+    // Same reasoning as authController.issueSession: frontend proxies API
+    // requests through Vercel rewrites, so the cookie is first-party and
+    // sameSite: 'strict' works — stronger than 'none'.
+    secure: env.IS_PRODUCTION,
+    sameSite: 'strict',
     path: '/',
     maxAge: 8 * 60 * 60 * 1000
   });
@@ -69,8 +68,8 @@ export function platformLogout(_req: Request, res: Response): void {
   // treats this as a different cookie and never actually clears the real one.
   res.clearCookie('platform_session_token', {
     httpOnly: true,
-    secure: true,
-    sameSite: 'none',
+    secure: env.IS_PRODUCTION,
+    sameSite: 'strict',
     path: '/'
   });
   res.status(200).json({ message: 'Logged out successfully' });

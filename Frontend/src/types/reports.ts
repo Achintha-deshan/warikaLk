@@ -44,3 +44,7 @@ export type DefaultedLoan = {
 
 export type DefaultedResponse = { loans: DefaultedLoan[]; total_capital_loss: number }
 export type AgentPerformance = { id: string; name: string; total_collected: number; payment_count: number; active_loans_managed: number }
+export type MonthlyOverviewLoan = { loan_id: string; loan_display_code?: string; customer_id: string; customer_name: string; customer_display_code?: string; amount_due: number; due_date: string; is_paid_this_cycle: boolean }
+export type MonthlyOverview = { month: string; total_expected: number; total_collected: number; total_pending: number; loans: MonthlyOverviewLoan[] }
+export type DailyDueEntry = { loan_id: string; loan_display_code?: string; loan_type: LoanType; customer_id: string; customer_name: string; customer_display_code?: string; amount_due: number; is_paid: boolean }
+export type DailyDueResponse = { date: string; total_due: number; total_collected: number; entries: DailyDueEntry[] }

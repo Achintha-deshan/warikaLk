@@ -1,0 +1,19 @@
+import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
+import api, { ApiError } from '../lib/api'
+import { ApiNotice, Spinner } from '../components/AuthLayout'
+import { formatDate, formatMoney } from '../lib/format'
+import { useLanguage } from '../hooks/useLanguageHook'
+import type { MonthlyOverview, MonthlyOverviewLoan } from '../types/reports'
+
+function currentMonth() { return new Date().toLocaleDateString('en-CA').slice(0, 7) }
+function shiftMonth(month: string, amount: number) { const date = new Date(`${month}-01T00:00:00`); date.setMonth(date.getMonth() + amount); return date.toLocaleDateString('en-CA').slice(0, 7) }
+
+export default function MonthlyReportPage() {
+  const { t } = useLanguage(); const [month, setMonth] = useState(currentMonth); const [result, setResult] = useState<MonthlyOverview | null>(null); const [selected, setSelected] = useState<'all' | 'collected' | 'pending'>('all'); const [loading, setLoading] = useState(true); const [notice, setNotice] = useState('')
+  useEffect(() => { api.get<MonthlyOverview>(`/reports/monthly-overview?month=${month}`).then(({ data }) => setResult(data)).catch((error: ApiError) => setNotice(error.message)).finally(() => setLoading(false)) }, [month])
+  const visibleLoans = (result?.loans || []).filter((loan) => selected === 'all' || (selected === 'collected' ? loan.is_paid_this_cycle : !loan.is_paid_this_cycle))
+  const cards = result ? [{ key: 'all' as const, label: t('reports.totalThisMonth'), value: result.total_expected }, { key: 'collected' as const, label: t('reports.collected'), value: result.total_collected }, { key: 'pending' as const, label: t('reports.stillPending'), value: result.total_pending }] : []
+  const changeMonth = (value: string) => { setLoading(true); setMonth(value) }
+  return <section className="page-frame report-page"><div className="page-heading"><div><span className="eyebrow">{t('nav.monthlyReport')}</span><h1>{t('reports.monthlyTitle')}</h1><p className="page-intro">{t('reports.monthlyIntro')}</p></div><div className="month-picker"><button type="button" onClick={() => changeMonth(shiftMonth(month, -1))} aria-label={t('common.previous')}>←</button><label>{t('reports.chooseMonth')}<input type="month" value={month} onChange={(event) => changeMonth(event.target.value)} /></label><button type="button" onClick={() => changeMonth(shiftMonth(month, 1))} aria-label={t('common.next')}>→</button></div></div><ApiNotice message={notice} />{loading ? <div className="state-block"><Spinner /><p>{t('common.loading')}</p></div> : result && <><div className="monthly-summary-cards">{cards.map((card) => <button type="button" className={`monthly-summary-card ${selected === card.key ? 'selected' : ''} ${card.key}`} onClick={() => setSelected(card.key)} key={card.key}><span>{card.label}</span><strong>{formatMoney(card.value)}</strong><small>{visibleLoans.length} loans</small></button>)}</div><div className="report-list">{visibleLoans.length === 0 ? <div className="state-block empty-state"><p>{t('reports.noMonthlyLoans')}</p></div> : visibleLoans.map((loan: MonthlyOverviewLoan) => <Link className="report-list-row" to={`/loans/${loan.loan_id}`} key={loan.loan_id}><span className="report-person"><strong>{loan.customer_name}</strong><small>{loan.customer_display_code || loan.loan_display_code}</small></span><span>{formatMoney(loan.amount_due)}</span><span>{t('reports.dueDate')}: {formatDate(loan.due_date)}</span><span className={`payment-status ${loan.is_paid_this_cycle ? 'paid' : 'pending'}`}>{loan.is_paid_this_cycle ? '✓ ' + t('common.paid') : '◷ ' + t('common.unpaid')}</span></Link>)}</div></>}</section>
+}
