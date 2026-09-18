@@ -1,0 +1,16 @@
+-- Evidence: EXPLAIN ANALYZE against a synthetic 60,000-row payments table
+-- for one tenant (simulating ~5 years of a busy daily-collection business).
+-- Every date-range query on payments (total_collected, interest-earned,
+-- collections/interest-payments lists, agent-performance) currently filters
+-- tenant_id via idx_payments_tenant, then re-filters paid_at as a Postgres
+-- Filter step on the heap AFTER fetching every one of that tenant's rows —
+-- confirmed via "Rows Removed by Filter: 51300" fetching all 60,000 rows to
+-- keep only ~8,700 in a 30-day window, costing 7.2ms. A composite index
+-- lets Postgres push the date bound into the index scan itself, cutting the
+-- same query to 2.9ms (~2.4x) at this volume — and the gap widens further
+-- for a tenant with more history, since the old index's cost scales with a
+-- tenant's TOTAL lifetime row count, not the size of the range being asked
+-- for. loans.status/loan_type did NOT show a comparable problem even at
+-- 5,000 loans on one tenant (1.6ms, unchanged) — that table doesn't grow
+-- fast enough for this to matter, so no composite index was added there.
+CREATE INDEX idx_payments_tenant_paidat ON payments(tenant_id, paid_at);

@@ -1,0 +1,13 @@
+import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
+import api, { ApiError } from '../lib/api'
+import { ApiNotice, Spinner } from '../components/AuthLayout'
+import { formatMoney } from '../lib/format'
+import type { AgentPerformance } from '../types/reports'
+
+export default function AgentPerformancePage() {
+  const [params, setParams] = useSearchParams(); const [from, setFrom] = useState(params.get('from') || ''); const [to, setTo] = useState(params.get('to') || ''); const [staff, setStaff] = useState<AgentPerformance[]>([]); const [loading, setLoading] = useState(true); const [notice, setNotice] = useState('')
+  const query = new URLSearchParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) }).toString()
+  useEffect(() => { api.get<{ staff: AgentPerformance[] }>(`/reports/agent-performance${query ? `?${query}` : ''}`).then(({ data }) => setStaff([...data.staff].sort((left, right) => Number(right.total_collected) - Number(left.total_collected)))).catch((error: ApiError) => setNotice(error.message)).finally(() => setLoading(false)) }, [query])
+  return <section className="page-frame"><div><span className="eyebrow">Reports / Owner only</span><h1>Agent performance</h1><p className="page-intro">Compare collections and the active portfolio each staff member manages.</p></div><form className="report-filters" onSubmit={(event) => { event.preventDefault(); setParams({ ...(from ? { from } : {}), ...(to ? { to } : {}) }) }}><label>From<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label><label>To<input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label><button className="primary-button filter-button" type="submit">Apply filters <span>↗</span></button></form><ApiNotice message={notice} />{loading ? <div className="state-block"><Spinner /><p>Loading performance...</p></div> : staff.length === 0 ? <div className="state-block empty-state"><h2>No staff activity.</h2><p>There are no collections in this date range.</p></div> : <div className="report-table-wrap"><table className="data-table"><thead><tr><th>Staff member</th><th>Total collected</th><th>Payment count</th><th>Active loans managed</th></tr></thead><tbody>{staff.map((member) => <tr key={member.id}><td><strong>{member.name}</strong></td><td>{formatMoney(member.total_collected)}</td><td>{member.payment_count}</td><td>{member.active_loans_managed}</td></tr>)}</tbody></table></div>}</section>
+}
