@@ -46,10 +46,12 @@ export const LOAN_COLUMNS =
 // display_code, created_at), so a query that joins both tables needs an
 // explicitly-aliased column list rather than the bare LOAN_COLUMNS above —
 // that ambiguity would otherwise be a SQL error, not just a naming clash.
-// Used only by listLoans/getLoan; createLoan's RETURNING and the plain
-// SELECT ... FOR UPDATE in recordPayment/closeLoan have no alias to qualify
-// against and don't need the customer join anyway.
-const LOAN_COLUMNS_QUALIFIED =
+// Used by listLoans/getLoan, and exported for reportController's
+// monthly-overview/daily-due endpoints, which need the same loans+customers
+// join; createLoan's RETURNING and the plain SELECT ... FOR UPDATE in
+// recordPayment/closeLoan have no alias to qualify against and don't need
+// the customer join anyway.
+export const LOAN_COLUMNS_QUALIFIED =
   "l.id, l.tenant_id, l.customer_id, l.created_by, l.loan_type, l.display_code, l.principal, l.interest_rate, l.total_days, l.cycle_mode, l.start_date::text AS start_date, l.status, l.created_at";
 
 const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;

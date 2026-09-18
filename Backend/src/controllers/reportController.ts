@@ -14,6 +14,7 @@ import {
   toCalcInput,
   toPaymentStats,
   LOAN_COLUMNS,
+  LOAN_COLUMNS_QUALIFIED,
   PAYMENT_STATS_LATERAL,
   type LoanRow,
   type PaymentStatsRow
@@ -700,5 +701,270 @@ export async function getAgentPerformance(req: Request, res: Response): Promise<
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to fetch agent performance report' });
+  }
+}
+
+const MonthlyOverviewQuerySchema = z.object({
+  month: z.string().regex(/^\d{4}-\d{2}$/).optional()
+});
+
+// Resolves "YYYY-MM" (or the current month if omitted) into a half-open
+// [from, toExclusive) instant range, used only to scope total_collected —
+// an actual historical sum. Date.UTC(year, month, 1) here is plain calendar
+// rollover (December -> January of next year), which is exactly wanted;
+// unlike loanCalculations.ts's addMonthsClamped, there's no day-of-month to
+// clamp since this always targets the 1st of a month.
+function resolveMonthRange(monthStr: string | undefined): { from: Date; toExclusive: Date; monthIso: string } {
+  const now = new Date();
+  const monthIso = monthStr ?? `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+  const [year, month] = monthIso.split('-').map(Number);
+  const from = new Date(Date.UTC(year, month - 1, 1));
+  const toExclusive = new Date(Date.UTC(year, month, 1));
+  return { from, toExclusive, monthIso };
+}
+
+export async function getMonthlyOverview(req: Request, res: Response): Promise<void> {
+  if (!req.user) {
+    res.status(401).json({ error: 'Authentication required' });
+    return;
+  }
+
+  const parsed = MonthlyOverviewQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.flatten() });
+    return;
+  }
+
+  const tenantId = req.user.tenantId;
+  const { from, toExclusive, monthIso } = resolveMonthRange(parsed.data.month);
+
+  try {
+    const totalCollectedResult = await pool.query<{ total: string }>(
+      `SELECT COALESCE(SUM(amount), 0) AS total FROM payments
+        WHERE tenant_id = $1 AND payment_type IN ('normal_cycle', 'late_charge')
+          AND paid_at >= $2 AND paid_at < $3`,
+      [tenantId, from, toExclusive]
+    );
+    const totalCollected = Number(totalCollectedResult.rows[0].total);
+
+    // Active monthly loans + the same lifetime payment stats computeLoanState
+    // needs everywhere else (via PAYMENT_STATS_LATERAL), plus a
+    // normal_cycle-SPECIFIC last-payment date for is_paid_this_cycle below —
+    // deliberately distinct from last_interest_payment_at (which blends
+    // normal_cycle + late_charge and feeds the schedule calculation itself,
+    // not this paid flag).
+    const result = await pool.query<
+      LoanRow &
+        PaymentStatsRow & {
+          customer_name: string;
+          customer_display_code: string;
+          last_normal_cycle_payment_at: Date | null;
+        }
+    >(
+      `SELECT ${LOAN_COLUMNS_QUALIFIED},
+              c.name AS customer_name, c.display_code AS customer_display_code,
+              COALESCE(pa.installments_paid, 0) AS installments_paid,
+              COALESCE(pa.daily_total_paid, 0) AS daily_total_paid,
+              pa.last_interest_payment_at,
+              COALESCE(pa.principal_paid, 0) AS principal_paid,
+              (
+                SELECT MAX(p.paid_at) FROM payments p
+                 WHERE p.loan_id = l.id AND p.payment_type = 'normal_cycle'
+              ) AS last_normal_cycle_payment_at
+         FROM loans l
+         JOIN customers c ON c.id = l.customer_id AND c.tenant_id = l.tenant_id
+         LEFT JOIN LATERAL (${PAYMENT_STATS_LATERAL}) pa ON true
+        WHERE l.tenant_id = $1 AND l.status = 'active' AND l.loan_type = 'monthly'`,
+      [tenantId]
+    );
+
+    const thresholds = await getOverdueThresholds(tenantId);
+    // Deliberately "now", not tied to the requested `month` — a monthly
+    // loan only ever has ONE current cycle at any given moment; `month`
+    // scopes total_collected (an actual historical sum), but the loans list
+    // reflects present-day cycle state, exactly what the loan detail page
+    // would show if opened right now. Reconstructing "what would have been
+    // due as of some date within a past month" would need periodStart
+    // recomputed as of that date too — a materially different, more complex
+    // calculation this task didn't ask for.
+    const now = new Date();
+
+    let totalExpected = 0;
+    const loans = result.rows.map((row) => {
+      const state = computeLoanState(toCalcInput(row), toPaymentStats(row), thresholds, now);
+      // loan_type = 'monthly' is guaranteed by the WHERE clause above, so
+      // state.type is always 'monthly' — this check just avoids an
+      // unchecked cast onto a discriminated union, same convention as
+      // loanController.ts.
+      const due = state.type === 'monthly' ? state.due : null;
+      const amountDue = due?.normalAmount ?? 0;
+      totalExpected += amountDue;
+
+      const cycleStartDate = due ? new Date(`${due.cycleStart}T00:00:00.000Z`) : null;
+      const isPaidThisCycle =
+        cycleStartDate !== null &&
+        row.last_normal_cycle_payment_at !== null &&
+        row.last_normal_cycle_payment_at.getTime() >= cycleStartDate.getTime();
+
+      return {
+        loan_id: row.id,
+        loan_display_code: row.display_code,
+        customer_id: row.customer_id,
+        customer_name: row.customer_name,
+        customer_display_code: row.customer_display_code,
+        amount_due: amountDue,
+        due_date: due?.nextDueDate ?? null,
+        is_paid_this_cycle: isPaidThisCycle
+      };
+    });
+
+    const totalCollectedRounded = roundToCents(totalCollected);
+    const totalExpectedRounded = roundToCents(totalExpected);
+
+    res.status(200).json({
+      month: monthIso,
+      total_expected: totalExpectedRounded,
+      total_collected: totalCollectedRounded,
+      total_pending: roundToCents(Math.max(0, totalExpectedRounded - totalCollectedRounded)),
+      loans
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch monthly overview' });
+  }
+}
+
+const DailyDueQuerySchema = z.object({
+  date: z.string().regex(DATE_REGEX).optional()
+});
+
+export async function getDailyDue(req: Request, res: Response): Promise<void> {
+  if (!req.user) {
+    res.status(401).json({ error: 'Authentication required' });
+    return;
+  }
+
+  const parsed = DailyDueQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.flatten() });
+    return;
+  }
+
+  const tenantId = req.user.tenantId;
+  const dateIso = parsed.data.date ?? toIsoDate(new Date());
+  const dateStart = new Date(`${dateIso}T00:00:00.000Z`);
+  const dateEndExclusive = new Date(dateStart.getTime() + 24 * 60 * 60 * 1000);
+
+  try {
+    // A daily loan has exactly total_days distinct due-days, starting at
+    // start_date — so the exclusive upper bound is start_date + total_days
+    // (Postgres date + integer arithmetic), not total_days - 1 inclusive;
+    // day 1 = start_date, day total_days = start_date + (total_days - 1).
+    const dailyResult = await pool.query<{
+      id: string;
+      loan_display_code: string;
+      customer_id: string;
+      customer_name: string;
+      customer_display_code: string;
+      principal: string;
+      interest_rate: string;
+      total_days: number;
+      is_paid: boolean;
+    }>(
+      `SELECT l.id, l.display_code AS loan_display_code, l.customer_id,
+              c.name AS customer_name, c.display_code AS customer_display_code,
+              l.principal, l.interest_rate, l.total_days,
+              EXISTS(
+                SELECT 1 FROM payments p
+                 WHERE p.loan_id = l.id AND p.payment_type = 'daily_installment'
+                   AND p.paid_at >= $2 AND p.paid_at < $3
+              ) AS is_paid
+         FROM loans l
+         JOIN customers c ON c.id = l.customer_id AND c.tenant_id = l.tenant_id
+        WHERE l.tenant_id = $1 AND l.status = 'active' AND l.loan_type = 'daily'
+          AND l.start_date <= $4::date AND $4::date < (l.start_date + l.total_days)`,
+      [tenantId, dateStart, dateEndExclusive, dateIso]
+    );
+
+    const dailyEntries = dailyResult.rows.map((row) => {
+      const schedule = calculateDailyLoanSchedule(Number(row.principal), Number(row.interest_rate), row.total_days);
+      return {
+        loan_id: row.id,
+        loan_display_code: row.loan_display_code,
+        loan_type: 'daily' as LoanType,
+        customer_id: row.customer_id,
+        customer_name: row.customer_name,
+        customer_display_code: row.customer_display_code,
+        amount_due: schedule.dailyInstallment,
+        is_paid: row.is_paid
+      };
+    });
+
+    // A monthly loan's nextDueDate depends only on (start_date, cycle_mode,
+    // last interest payment) — never on "today" — so it's the same value
+    // regardless of which date is being queried; filtered afterward to just
+    // the loans whose next due date happens to equal this exact date.
+    const monthlyResult = await pool.query<
+      LoanRow &
+        PaymentStatsRow & {
+          customer_name: string;
+          customer_display_code: string;
+          is_paid: boolean;
+        }
+    >(
+      `SELECT ${LOAN_COLUMNS_QUALIFIED},
+              c.name AS customer_name, c.display_code AS customer_display_code,
+              COALESCE(pa.installments_paid, 0) AS installments_paid,
+              COALESCE(pa.daily_total_paid, 0) AS daily_total_paid,
+              pa.last_interest_payment_at,
+              COALESCE(pa.principal_paid, 0) AS principal_paid,
+              EXISTS(
+                SELECT 1 FROM payments p
+                 WHERE p.loan_id = l.id AND p.payment_type = 'normal_cycle'
+                   AND p.paid_at >= $2 AND p.paid_at < $3
+              ) AS is_paid
+         FROM loans l
+         JOIN customers c ON c.id = l.customer_id AND c.tenant_id = l.tenant_id
+         LEFT JOIN LATERAL (${PAYMENT_STATS_LATERAL}) pa ON true
+        WHERE l.tenant_id = $1 AND l.status = 'active' AND l.loan_type = 'monthly'`,
+      [tenantId, dateStart, dateEndExclusive]
+    );
+
+    const thresholds = await getOverdueThresholds(tenantId);
+    const monthlyEntries = monthlyResult.rows
+      .map((row) => {
+        const state = computeLoanState(toCalcInput(row), toPaymentStats(row), thresholds, dateStart);
+        const due = state.type === 'monthly' ? state.due : null;
+        if (!due || due.nextDueDate !== dateIso) {
+          return null;
+        }
+        return {
+          loan_id: row.id,
+          loan_display_code: row.display_code,
+          loan_type: 'monthly' as LoanType,
+          customer_id: row.customer_id,
+          customer_name: row.customer_name,
+          customer_display_code: row.customer_display_code,
+          amount_due: due.normalAmount,
+          is_paid: row.is_paid
+        };
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+
+    const entries = [...dailyEntries, ...monthlyEntries];
+    const totalDue = roundToCents(entries.reduce((sum, entry) => sum + entry.amount_due, 0));
+    const totalCollected = roundToCents(
+      entries.filter((entry) => entry.is_paid).reduce((sum, entry) => sum + entry.amount_due, 0)
+    );
+
+    res.status(200).json({
+      date: dateIso,
+      total_due: totalDue,
+      total_collected: totalCollected,
+      entries
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch daily due report' });
   }
 }

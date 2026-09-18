@@ -161,6 +161,14 @@ export function isDailyLoanFullyRepaid(totalAmountDue: number, totalPaid: number
 
 export interface MonthlyLoanDue {
   nextDueDate: string;
+  // Start of the current cycle window (the previous fixed anchor, or
+  // start_date itself for the loan's very first cycle) — exposed so callers
+  // can determine "has this specific cycle already been paid" (e.g. a
+  // normal_cycle payment dated on/after cycleStart) without recomputing any
+  // of the anchor-finding logic themselves. Purely an exposed byproduct of
+  // work this function already does internally (previousAnchor below) —
+  // nothing new is calculated for it.
+  cycleStart: string;
   normalAmount: number;
   lateAmount: number;
   daysIntoLateCycle: number;
@@ -245,6 +253,7 @@ export function calculateMonthlyLoanDue(
 
   return {
     nextDueDate: toIsoDate(nextDueDate),
+    cycleStart: toIsoDate(previousAnchor),
     normalAmount: roundToCents(rawNormalAmount),
     lateAmount: roundToCents(rawLateAmount),
     daysIntoLateCycle
