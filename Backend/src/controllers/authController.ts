@@ -137,8 +137,16 @@ function issueSession(res: Response, payload: { userId: string; tenantId: string
   const token = jwt.sign(payload, env.JWT_SECRET, { expiresIn: '8h' });
   res.cookie('session_token', token, {
     httpOnly: true,
-    secure: env.IS_PRODUCTION,
-    sameSite: 'strict',
+    // sameSite: 'none' is required for a cross-origin frontend/backend
+    // deployment (e.g. frontend on Vercel, API on Railway) — browsers only
+    // send a SameSite=None cookie at all if it's ALSO Secure, unconditionally,
+    // regardless of environment. secure: env.IS_PRODUCTION would have made
+    // this false outside production, which combined with sameSite: 'none'
+    // means modern browsers reject the cookie outright rather than just
+    // being lenient about it — not a degraded-but-working state, a
+    // completely broken one.
+    secure: true,
+    sameSite: 'none',
     path: '/',
     maxAge: 8 * 60 * 60 * 1000
   });
@@ -442,10 +450,14 @@ export async function loginOtp(req: Request, res: Response): Promise<void> {
 }
 
 export function logout(_req: Request, res: Response): void {
+  // Must match issueSession's cookie options exactly (secure, sameSite,
+  // path) — clearCookie works by setting an already-expired cookie with the
+  // same attributes; a mismatch means the browser treats it as a different
+  // cookie and the original one never actually gets cleared.
   res.clearCookie('session_token', {
     httpOnly: true,
-    secure: env.IS_PRODUCTION,
-    sameSite: 'strict',
+    secure: true,
+    sameSite: 'none',
     path: '/'
   });
   res.status(200).json({ message: 'Logged out successfully' });

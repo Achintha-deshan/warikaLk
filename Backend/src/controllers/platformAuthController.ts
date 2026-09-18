@@ -24,8 +24,12 @@ function issuePlatformSession(res: Response, adminId: string): void {
   const token = jwt.sign({ adminId, isPlatformAdmin: true }, env.PLATFORM_JWT_SECRET, { expiresIn: '8h' });
   res.cookie('platform_session_token', token, {
     httpOnly: true,
-    secure: env.IS_PRODUCTION,
-    sameSite: 'strict',
+    // Same reasoning as authController.issueSession: sameSite: 'none' for a
+    // cross-origin deployment requires secure: true unconditionally, not
+    // env-dependent — secure: false + sameSite: 'none' is rejected outright
+    // by modern browsers, not just discouraged.
+    secure: true,
+    sameSite: 'none',
     path: '/',
     maxAge: 8 * 60 * 60 * 1000
   });
@@ -61,10 +65,12 @@ export async function platformLogin(req: Request, res: Response): Promise<void> 
 }
 
 export function platformLogout(_req: Request, res: Response): void {
+  // Must match issuePlatformSession's cookie options exactly, or the browser
+  // treats this as a different cookie and never actually clears the real one.
   res.clearCookie('platform_session_token', {
     httpOnly: true,
-    secure: env.IS_PRODUCTION,
-    sameSite: 'strict',
+    secure: true,
+    sameSite: 'none',
     path: '/'
   });
   res.status(200).json({ message: 'Logged out successfully' });
