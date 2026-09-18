@@ -33,6 +33,13 @@ process.on('unhandledRejection', (reason) => {
 const app = express();
 const PORT = process.env.PORT || 4000;
 
+// Trust exactly one hop (Railway's single reverse proxy), not "true" — "true"
+// would trust X-Forwarded-For from ANY hop, letting a client spoof that
+// header directly and bypass express-rate-limit's per-IP limits entirely.
+// "1" means Express only trusts the IP the proxy immediately in front of it
+// reports, not whatever a client claims.
+app.set('trust proxy', 1);
+
 app.use(helmet());
 app.use(compression());
 app.use(cors({
