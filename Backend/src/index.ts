@@ -50,7 +50,7 @@ app.use(express.json());
 app.use(cookieParser());
 
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', message: 'WarikaLk backend eka wade karanawa' });
+  res.json({ status: 'ok', message: 'WarikaLk backend is working' });
 });
 
 app.get('/api/db-check', async (req, res) => {
@@ -81,7 +81,7 @@ app.use(errorHandler);
 async function start(): Promise<void> {
   await seedPlatformAdmin();
   app.listen(PORT, () => {
-    console.log(`Server eka run wenawa → http://localhost:${PORT}`);
+    console.log(`Server is Running → http://localhost:${PORT}`);
   });
 }
 
