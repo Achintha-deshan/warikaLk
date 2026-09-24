@@ -4,10 +4,12 @@ import { PoolClient } from 'pg';
 import { pool } from '../config/db';
 import {
   computeLoanState,
+  roundToCents,
   type LoanCalcInput,
   type LoanPaymentStats,
   type OverdueThresholds,
   type LoanState,
+  type OverdueSeverity,
   type CycleMode,
   type LoanType
 } from '../services/loanCalculations';
@@ -190,15 +192,82 @@ async function getPaymentStatsForLoan(client: Pick<PoolClient, 'query'>, loanId:
   return toPaymentStats(result.rows[0]);
 }
 
+interface OverdueInfo {
+  level: 'none' | 'warning' | 'critical';
+  daysOverdue: number;
+}
+
+function toOverdueInfo(severity: OverdueSeverity, daysOverdue: number): OverdueInfo {
+  return { level: severity === 'ok' ? 'none' : severity, daysOverdue };
+}
+
+// Shapes computeLoanState's discriminated-union result into the flat
+// { calculation, overdue } contract the frontend actually reads (LoanDetail /
+// Loan types in the frontend's src/types/loan.ts) — computeLoanState's own
+// return shape (a `type` discriminant plus nested `due`/`schedule`/`progress`)
+// is convenient for server-side logic (recordPayment/closeLoan narrow on
+// `.type`) but was never what any client consumed. Previously serializeLoan
+// spread `state` directly onto the loan object with no `calculation`/`overdue`
+// key at all, so every frontend page reading `data.calculation`/`loan.overdue`
+// silently got undefined — see the "Next due: Not set" investigation.
+function toCalculationAndOverdue(
+  state: LoanState,
+  stats: LoanPaymentStats
+): { calculation: Record<string, unknown>; overdue: OverdueInfo } {
+  if (state.type === 'daily') {
+    const { schedule, progress, isFullyRepaid, overdueSeverity, estimatedOutstandingPrincipal } = state;
+    const remainingAmount = roundToCents(Math.max(0, schedule.totalAmountDue - stats.dailyTotalPaid));
+    return {
+      calculation: {
+        totalInterest: schedule.totalInterest,
+        totalAmountDue: schedule.totalAmountDue,
+        dailyInstallment: schedule.dailyInstallment,
+        amountPaid: stats.dailyTotalPaid,
+        totalPaid: stats.dailyTotalPaid,
+        remainingAmount,
+        daysPaid: progress.installmentsPaid,
+        fullySettled: isFullyRepaid,
+        // See calculateDailyLoanSchedule's note: daily loans have no stored
+        // principal/interest split per payment, so this is the same
+        // ratio-based estimate computeLoanState already produces — not a
+        // separately reimplemented figure.
+        outstandingPrincipal: estimatedOutstandingPrincipal
+      },
+      overdue: toOverdueInfo(overdueSeverity, progress.daysBehind)
+    };
+  }
+
+  const { due, outstandingPrincipal, overdueSeverity } = state;
+  // Mirrors closeLoan's own two-part gate exactly (outstandingPrincipal
+  // settled AND no outstanding interest) — deliberately NOT exposed as a
+  // standalone remainingAmount, since outstandingPrincipal alone reaching 0
+  // while interest is still owed must not let the frontend's
+  // `remainingAmount <= 0` OR-branch mark the loan closeable.
+  const fullySettled = outstandingPrincipal <= 0.01 && due.daysIntoLateCycle <= 0;
+  return {
+    calculation: {
+      nextDueDate: due.nextDueDate,
+      normalAmount: due.normalAmount,
+      lateAmount: due.lateAmount,
+      daysIntoLateCycle: due.daysIntoLateCycle,
+      outstandingPrincipal,
+      fullySettled
+    },
+    overdue: toOverdueInfo(overdueSeverity, due.daysIntoLateCycle)
+  };
+}
+
 // DB-sourced fields stay snake_case (matching every other controller in this
-// codebase); the computed sub-object uses camelCase since it's pure-JS
-// derived data, not a persisted column.
-function serializeLoan(loan: LoanRow, state: LoanState) {
+// codebase); calculation/overdue are pure-JS derived data, not persisted
+// columns.
+function serializeLoan(loan: LoanRow, state: LoanState, stats: LoanPaymentStats) {
+  const { calculation, overdue } = toCalculationAndOverdue(state, stats);
   return {
     ...loan,
     principal: Number(loan.principal),
     interest_rate: Number(loan.interest_rate),
-    ...state
+    calculation,
+    overdue
   };
 }
 
@@ -263,14 +332,10 @@ export async function createLoan(req: Request, res: Response): Promise<void> {
     await client.query('COMMIT');
 
     const thresholds = await getOverdueThresholds(tenantId);
-    const state = computeLoanState(
-      toCalcInput(loan),
-      { installmentsPaid: 0, dailyTotalPaid: 0, lastInterestPaymentAt: null, principalPaid: 0 },
-      thresholds,
-      new Date()
-    );
+    const stats: LoanPaymentStats = { installmentsPaid: 0, dailyTotalPaid: 0, lastInterestPaymentAt: null, principalPaid: 0 };
+    const state = computeLoanState(toCalcInput(loan), stats, thresholds, new Date());
 
-    res.status(201).json({ loan: serializeLoan(loan, state) });
+    res.status(201).json({ loan: serializeLoan(loan, state, stats) });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(err);
@@ -329,8 +394,9 @@ export async function listLoans(req: Request, res: Response): Promise<void> {
     // Pure JS math per row, no extra DB round trips — trivially cheap even
     // at the max page size (100 rows).
     const loans = result.rows.map((row) => {
-      const state = computeLoanState(toCalcInput(row), toPaymentStats(row), thresholds, asOfDate);
-      return serializeLoan(row, state);
+      const stats = toPaymentStats(row);
+      const state = computeLoanState(toCalcInput(row), stats, thresholds, asOfDate);
+      return serializeLoan(row, state, stats);
     });
 
     res.status(200).json({ loans, pagination: { page, limit, total } });
@@ -394,14 +460,10 @@ export async function getLoan(req: Request, res: Response): Promise<void> {
       .reduce((sum, p) => sum + p.amount, 0);
 
     const thresholds = await getOverdueThresholds(tenantId);
-    const state = computeLoanState(
-      toCalcInput(loan),
-      { installmentsPaid, dailyTotalPaid, lastInterestPaymentAt, principalPaid },
-      thresholds,
-      new Date()
-    );
+    const stats: LoanPaymentStats = { installmentsPaid, dailyTotalPaid, lastInterestPaymentAt, principalPaid };
+    const state = computeLoanState(toCalcInput(loan), stats, thresholds, new Date());
 
-    res.status(200).json({ loan: serializeLoan(loan, state), payments });
+    res.status(200).json({ loan: serializeLoan(loan, state, stats), payments });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to fetch loan' });
@@ -591,7 +653,7 @@ export async function recordPayment(req: Request, res: Response): Promise<void> 
     const finalStats = await getPaymentStatsForLoan(pool, updatedLoan.id);
     const updatedState = computeLoanState(toCalcInput(updatedLoan), finalStats, thresholds, new Date());
 
-    res.status(201).json({ loan: serializeLoan(updatedLoan, updatedState) });
+    res.status(201).json({ loan: serializeLoan(updatedLoan, updatedState, finalStats) });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(err);
