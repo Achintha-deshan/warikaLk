@@ -259,27 +259,67 @@ export async function deleteCustomer(req: Request, res: Response): Promise<void>
   }
 
   const tenantId = req.user.tenantId;
+  const customerId = parsedId.data;
 
+  // Real, permanent delete — reversed from the earlier soft-delete design
+  // (migration 005). loans.customer_id and payments.loan_id are both
+  // ON DELETE CASCADE (migration 001, unchanged since), so deleting the
+  // customer row here also removes every one of their loans and every
+  // payment against those loans in the same statement — no separate
+  // cleanup queries needed for the delete itself.
+  const client = await pool.connect();
   try {
-    // Soft delete only — see migration 005 notes. Hard-deleting would cascade
-    // through loans.customer_id and then payments.loan_id, destroying real
-    // financial history for the sake of one "delete customer" click.
-    const result = await pool.query(
-      `UPDATE customers
-          SET deleted_at = now()
-        WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-        RETURNING id`,
-      [parsedId.data, tenantId]
-    );
+    await client.query('BEGIN');
 
-    if (result.rowCount !== 1) {
+    // Same not-confirming-other-tenants'-data 404 pattern as every other
+    // customer/loan handler. Deliberately no deleted_at filter here (unlike
+    // list/get/update): a real delete's only precondition is "does this row
+    // exist for this tenant", not whatever an old soft-delete flag says.
+    const existsResult = await client.query(
+      'SELECT id FROM customers WHERE id = $1 AND tenant_id = $2',
+      [customerId, tenantId]
+    );
+    if (existsResult.rows.length === 0) {
+      await client.query('ROLLBACK');
       res.status(404).json({ error: 'Customer not found' });
       return;
     }
 
-    res.status(200).json({ message: 'Customer deleted successfully' });
+    // Counted BEFORE the delete, not via RETURNING on the cascade — RETURNING
+    // on `DELETE FROM customers` only ever gives back the customers row
+    // itself, never what CASCADE removed from loans/payments beneath it, and
+    // once the delete commits those rows are gone to count. This count is
+    // informational only (for a frontend confirm dialog), so the small race
+    // window against a concurrent payment/loan insert for this same customer
+    // between this SELECT and the DELETE below isn't guarded further — it
+    // wouldn't affect what's actually deleted, only what this response
+    // reports was deleted.
+    const loanCountResult = await client.query<{ count: string }>(
+      'SELECT COUNT(*) FROM loans WHERE customer_id = $1 AND tenant_id = $2',
+      [customerId, tenantId]
+    );
+    const paymentCountResult = await client.query<{ count: string }>(
+      `SELECT COUNT(*) FROM payments p
+         JOIN loans l ON l.id = p.loan_id
+        WHERE l.customer_id = $1 AND l.tenant_id = $2`,
+      [customerId, tenantId]
+    );
+    const loansDeleted = Number(loanCountResult.rows[0].count);
+    const paymentsDeleted = Number(paymentCountResult.rows[0].count);
+
+    await client.query('DELETE FROM customers WHERE id = $1 AND tenant_id = $2', [customerId, tenantId]);
+
+    await client.query('COMMIT');
+
+    res.status(200).json({
+      message: 'Customer deleted permanently',
+      deleted: { customers: 1, loans: loansDeleted, payments: paymentsDeleted }
+    });
   } catch (err) {
+    await client.query('ROLLBACK');
     console.error(err);
     res.status(500).json({ error: 'Failed to delete customer' });
+  } finally {
+    client.release();
   }
 }
