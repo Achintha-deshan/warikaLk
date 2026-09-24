@@ -184,6 +184,8 @@ button:disabled { cursor: wait; opacity: .55; }
 .detail-heading { margin-top: 45px; align-items: end; }
 .detail-actions { display: flex; align-items: center; gap: 20px; }
 .delete-link { color: #8c251c; }
+.delete-confirm-field { display: grid; gap: 8px; margin-top: 18px; color: var(--text-secondary); font-size: 12px; font-weight: 700; }
+.delete-confirm-field input { width: 100%; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--card-bg); padding: 11px 12px; color: var(--text-primary); }
 .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid #cfcfca; margin-top: 48px; }
 .detail-item { display: grid; gap: 11px; padding: 24px 25px 24px 0; border-bottom: 1px solid #cfcfca; }
 .detail-item:nth-child(even) { padding-left: 25px; border-left: 1px solid #cfcfca; }

@@ -6,10 +6,11 @@ import { getFieldError } from "../components/formUtils";
 import ConfirmDialog from "../components/ConfirmDialog";
 import { formatDate, formatMoney } from "../lib/format";
 import { useAuth } from "../hooks/useAuth";
-import type { LoanCalculation, LoanDetail, Payment } from "../types/loan";
+import type { Loan, LoanCalculation, LoanDetail, Payment } from "../types/loan";
 
 const emptyCalculation: LoanCalculation = {};
 const today = new Date().toLocaleDateString("en-CA");
+type LoanDetailResponse = { loan: Loan; payments?: Payment[] };
 
 function overdueText(level: string | undefined) {
   return level === "critical"
@@ -45,14 +46,16 @@ export default function LoanDetailPage() {
     if (!id) return;
     setLoading(true);
     api
-      .get<LoanDetail>(`/loans/${id}`)
+      .get<LoanDetailResponse>(`/loans/${id}`)
       .then(({ data }) => {
-        const calculation = data.calculation ?? emptyCalculation;
+        const calculation = data.loan.calculation ?? emptyCalculation;
+        const overdue = data.loan.overdue ?? { level: "none", daysOverdue: 0 };
         const normalizedDetail: LoanDetail = {
           ...data,
+          loan: { ...data.loan, calculation, overdue },
           calculation,
           payments: Array.isArray(data.payments) ? data.payments : [],
-          overdue: data.overdue ?? { level: "none", daysOverdue: 0 },
+          overdue,
         };
         setDetail(normalizedDetail);
         setAmount(calculation.dailyInstallment?.toString() || "");
@@ -244,6 +247,9 @@ export default function LoanDetailPage() {
                 <p>
                   Due today · {formatMoney(calculation.totalAmountDue)} total
                 </p>
+                <p>
+                  Principal balance: {formatMoney(calculation.outstandingPrincipal)}
+                </p>
                 <div className="progress-track">
                   <span style={{ width: `${progress}%` }} />
                 </div>
@@ -265,6 +271,10 @@ export default function LoanDetailPage() {
                   <p>
                     Next due{" "}
                     <strong>{formatDate(calculation.nextDueDate)}</strong>
+                  </p>
+                  <p>
+                    Outstanding principal{" "}
+                    <strong>{formatMoney(calculation.outstandingPrincipal)}</strong>
                   </p>
                 </div>
               </>

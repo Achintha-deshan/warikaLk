@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import api, { ApiError } from '../lib/api'
 import { ApiNotice, Field, Spinner } from '../components/AuthLayout'
 import { getFieldError } from '../components/formUtils'
@@ -9,7 +9,10 @@ import type { Customer, Pagination } from '../types/data'
 const emptyCustomer = { name: '', phone: '', address: '', latitude: '', longitude: '' }
 
 export default function CustomersPage() {
+  const location = useLocation()
   const [customers, setCustomers] = useState<Customer[]>([]); const [pagination, setPagination] = useState<Pagination>({ page: 1, limit: 10, total: 0 }); const [search, setSearch] = useState(''); const [query, setQuery] = useState(''); const [refreshKey, setRefreshKey] = useState(0); const [loading, setLoading] = useState(true); const [modalOpen, setModalOpen] = useState(false); const [saving, setSaving] = useState(false); const [notice, setNotice] = useState(''); const [errors, setErrors] = useState<Record<string, string[] | string>>({}); const [form, setForm] = useState(emptyCustomer); const [coordinates, setCoordinates] = useState<{ latitude?: number; longitude?: number }>({})
+
+  useEffect(() => { const successMessage = (location.state as { successMessage?: string } | null)?.successMessage; if (successMessage) setNotice(successMessage) }, [location.state])
 
   useEffect(() => { const timer = window.setTimeout(() => { setQuery(search); setPagination((value) => ({ ...value, page: 1 })) }, 350); return () => window.clearTimeout(timer) }, [search])
   useEffect(() => { let active = true; const timer = window.setTimeout(() => { setLoading(true); api.get<{ customers: Customer[]; pagination: Pagination }>('/customers', { params: { search: query, page: pagination.page, limit: pagination.limit } }).then(({ data }) => { if (active) { setCustomers(data.customers); setPagination(data.pagination) } }).catch((error: ApiError) => { if (active) setNotice(error.message) }).finally(() => { if (active) setLoading(false) }) }, 0); return () => { active = false; window.clearTimeout(timer) } }, [query, pagination.page, pagination.limit, refreshKey])

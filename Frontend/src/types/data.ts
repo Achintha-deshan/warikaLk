@@ -8,6 +8,10 @@ export type Customer = {
   longitude?: number | null
   display_code: string
   created_at: string
+  loan_count?: number
+  payment_count?: number
+  loans_count?: number
+  payments_count?: number
 }
 
 export type StaffMember = {

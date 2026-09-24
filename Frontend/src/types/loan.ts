@@ -12,6 +12,7 @@ export type LoanCalculation = {
   daysIntoLateCycle?: number
   amountPaid?: number
   totalPaid?: number
+  outstandingPrincipal?: number
   remainingAmount?: number
   daysPaid?: number
   fullySettled?: boolean
